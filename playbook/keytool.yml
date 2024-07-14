@@ -1,0 +1,524 @@
+---
+- name: Check Localhost for Directories
+  hosts: localhost
+  become: yes
+  tasks:
+    - name: Verify "/home/certificates/download" exists
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: ansible
+        group: wheel
+        mode: '0770'
+      loop:
+        - /home/certificates/csr_req/old_csr
+        - /home/certificates/upload_certs
+ 
+    - name: ensure link from certificates to user home directories exists
+      ansible.builtin.file:
+        src: /home/certificates
+        dest: /home/{{ item }}/certificates
+        state: link
+        owner: ansible
+        group: wheel
+      with_items:
+        - user
+ 
+- name: Begin Java Keytool Automation
+  hosts: "{{ var_host }}"
+  become: yes
+  gather_facts: yes
+
+  vars_prompt:
+    - name: var_host
+      prompt: "Enter Server Host Name\n"
+      private: no
+    - name: var_part
+      prompt: "*****************************\n*** Please Read ***\n*****************************\n1 - Generating a new keystore and CSR. CSR will be placed in /home/certificates/csr. Please read documentation on what to do with the CSR.\n2 - Finalize Certificate Update. Ensure you have copied over the .zip file from your CA into /home/certificates/upload_certs on server. Example command below\n\nscp zipfile.zip yourusername@this_server:/home/certificates/upload_certs\n\n*** Please note that OBM servers require some manual inputs, as the automation can't operate the desktop gui application ***\n\nEnter Option 1 or 2"
+      private: no
+ 
+    - name: var_cls_certs
+      prompt: "Do you wish to remove or backup old keystores and csrs in /home/certificates?\n1.) Remove\n2.) Backup\n3.) Do Neither\nPlease enter a selection 1-3"
+      private: no
+ 
+  vars:
+    keystore_location: "/home/certificates/keystore"
+    csr_location: "/home/certificates/csr"
+    obm_keytool_location: "/opt/HP/BSM/JRE/bin/keytool"
+    na_keytool_location: "/opt/NA/jre/bin/keytool"
+    nnm_keytool_location: "/opt/OV/bin/nnmkeytool.ovpl"
+    csr_output_dir: "/home/certificates/csr"
+
+    # Adjust the information to your required values for your certificates
+    cert_information: "OU=value,OU=value,OU=value,O=value,C=value"
+ 
+    host_var_map:
+      ob1: obm
+      ob2: obm1
+      cob1: obm3
+ 
+      gn1: gnnm
+      nn1: nnm01
+      nn2: nnm02
+      nn3: nnm03
+      nn5: nnm05
+ 
+      nent94quanvsna1: na01
+      nent94quanvsna2: na02
+      na3: na03
+ 
+  tasks:
+      - name: create required directories, if they don't exist
+        file:
+          path: "{{ item }}"
+          state: directory
+          owner: ansible
+          group: wheel
+          mode: 0770
+        loop:
+          - /home/certificates/newcerts
+          - /home/certificates/csr
+          - /home/certificates/keystore
+          - /home/certificates/newcerts.backup
+          - /home/certificates/csr.backup
+          - /home/certificates/keystore.backup
+ 
+      - name: ensure certificates on {{ var_host }} is linked to users
+        ansible.builtin.file:
+          src: /home/certificates
+          dest: /home/{{ item }}/certificates
+          state: link
+          owner: ansible
+          group: wheel
+        with_items:
+          - user
+ 
+####################################################################################
+# Archive or Cleaning task section
+####################################################################################
+ 
+      # Remove Files Tasks
+
+      - name: remove old csrs in /home/certificates/csr
+        shell: >
+          rm -rf /home/certificates/csr/*
+        when: var_cls_certs == '1'
+ 
+      - name: remove old keystores in /home/certificates/keystore
+        shell: >
+          rm -rf /home/certificates/keystore/*
+        when: var_cls_certs == '1'
+ 
+      - name: remove old 'newcerts' in /home/certificates/newcerts
+        shell: >
+          rm -rf /home/certificates/newcerts/*
+        when: var_cls_certs == '1'
+ 
+      # Archive Files Tasks
+   
+      - name: backup keystore in /home/certificates
+        shell: >
+          mv -rf /home/certificates/keystore/* /home/certificates/keystore.backup/
+        when: var_cls_certs == '2'
+ 
+      - name: backup csr in /home/certificates
+        shell: >
+          mv -rf /home/certificates/csr/* /home/certificates/csr.backup/
+        when: var_cls_certs == '2'
+ 
+      - name: backup certs in /home/certificates
+        shell: >
+          mv -rf /home/certificates/newcerts/* /home/certificates/newcerts.backup/
+        when: var_cls_certs == '2'
+
+# begin part one
+ 
+  ##################################################################################
+  # NA
+  ####################################################################################
+      - name: generate new keystore
+        shell: >
+          /opt/NA/jre/bin/keytool
+          -genkey
+          -keyalg RSA
+          -keysize 2048
+          -alias "{{ host_var_map[var_host] }}"
+          -dname "cn={{ host_var_map[var_host] }},{{ cert_information }}"
+          -ext san="dns:{{ host_var_map[var_host] }},dns:{{ var_host }}"
+          -keystore /home/certificates/keystore/truecontrol.keystore
+          -storepass nakeypass
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+ 
+      - name: convert current pkcs7 store into pkcs12
+        shell: >
+          /opt/NA/jre/bin/keytool
+          -importkeystore
+          -srckeystore /home/certificates/keystore/truecontrol.keystore
+          -srcstorepass nakeypass
+          -destkeystore /home/certificates/keystore/truecontrol.keystore
+          -deststoretype PKCS12
+          -deststorepass nakeypass
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+
+      - name: part 1 -- generate new csr request
+        shell: >
+          /opt/NA/jre/bin/keytool
+          -certreq
+          -alias "{{ host_var_map[var_host] }}"
+          -file /home/certificates/csr/{{ host_var_map[var_host] }}_$(date +"%Y-%m-%d").csr
+          -keystore /home/certificates/keystore/truecontrol.keystore
+          -storepass nakeypass
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+  ####################################################################################
+  # NNM
+  ####################################################################################
+      - name: generate keystore
+        keytool:
+          keytool_location: "{{ nnm_keytool_location }}"
+          keystore_location: "{{ keystore_location }}/nnm-key.p12"
+          keystore_password: "nnmkeypass"
+          storetype: "pkcs12"
+          alias: "{{ host_var_map[var_host] }}"
+          dname: "cn={{ host_var_map[var_host] }},{{ cert_information }}"
+          san: "dns:{{ host_var_map[var_host] }},dns:{{ var_host }}"
+        register: obm_keytool_result
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+ 
+      - name: obm keytool results
+        debug:
+          msg: "{{ obm_keytool_result.message }}"
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+
+      - name: generate CSR
+        keytool_certreq:
+          keytool_location: "{{ nnm_keytool_location }}"
+          keystore_location: "{{ keystore_location }}/nnm-key.p12"
+          keystore_password: "nnmkeypass"
+          storetype: "pkcs12"
+          alias: "{{ host_var_map[var_host] }}"
+          csr_output_dir: "{{ csr_output_dir }}"
+          var_host: "{{ var_host }}"
+          host_var_map: "{{ host_var_map }}"
+        register: nnm_csr_result
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+ 
+      - name: Print result message for NNM CSR
+        debug:
+          msg: "{{ nnm_csr_result.message }}"
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+ 
+  ####################################################################################
+  # OBM
+  ####################################################################################
+
+      - name: generate keystore
+        keytool:
+          keytool_location: "{{ obm_keytool_location }}"
+          keystore_location: "{{ keystore_location }}/obm-key.p12"
+          keystore_password: "changeit"
+          storetype: "pkcs12"
+          alias: "{{ host_var_map[var_host] }}"
+          dname: "cn={{ host_var_map[var_host] }},{{ cert_information }}"
+        register: obm_keytool_result
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+ 
+      - name: Generate CSR request
+        shell: >
+          /opt/HP/BSM/JRE/bin/keytool
+          -certreq
+          -keystore /home/certificates/keystore/obm-key.p12
+          -storetype PKCS12
+          -storepass changeit
+          -alias "{{ host_var_map[var_host] }}"
+          -ext san="dns:{{ host_var_map[var_host] }},dns:{{ var_host }}"
+          -file /home/certificates/csr/{{ host_var_map[var_host] }}_$(date +"%Y-%m-%d").csr
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+ 
+      - name: obm keytool results
+        debug:
+          msg: "{{ obm_keytool_result.message }}"
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '1'
+ 
+  ####################################################################################
+  # Part 1 Finalization
+  ####################################################################################
+ 
+      - name: list SANs for email
+        debug:
+          msg: "**************Use the cat command on the CSR that was placed in /home/certificates/csr_req on this server, copy the contents into notepad and email to CA Authority.**************\n**************SANs To Send In Email:**************\n{{ var_host }}\n{{ host_var_map[var_host] }}\n**************Remember upload the zip file to this location**************\nscp zipfile.zip yourusername@this_server:/home/certificates/upload_certs "
+        when:
+          - var_part == '1'
+ 
+# Fetch CSR from Server      
+      - name: Fetch CSR files and save to /home/certificates
+        ansible.builtin.find:
+          paths: /home/certificates/csr/
+          patterns: "*.csr"
+        register: csr_files
+        when:
+          - var_part == '1'
+ 
+      - name: fetch {{ csr_files.files }} to local server
+        ansible.builtin.fetch:
+          src: "{{ item.path }}"
+          dest: /home/certificates/csr_req/
+          flat: yes
+        with_items: "{{ csr_files.files }}"
+        when:
+          - var_part == '1'
+ 
+# Begin Part 2
+ 
+      - name: push new zip files to server
+        copy:
+          src: "/home/certificates/upload_certs/"
+          dest: "/home/certificates/newcerts/"
+          owner: ansible
+          group: wheel
+          mode: 0770
+        when:
+          - var_part == '2'
+ 
+      - name: unzip certifiles file
+        expect:
+          command: unzip /home/certificates/newcerts/*.zip -d /home/certificates/newcerts/
+          responses:
+            'replace?': 'A'
+        when:
+          - var_part == '2'
+     
+  ####################################################################################
+  # NA
+  ####################################################################################
+      - name: ensure keystore backup directory exists
+        file:
+          path: /opt/NA/server/ext/appserver/standalone/configuration/.backup
+          state: directory
+          owner: root
+          group: root
+          mode: 0770
+        when:
+          - var_host in ['1', '2', '3']
+         - var_part == '2'
+ 
+      - name: backup original keystore
+        shell: >
+          cp /opt/NA/server/ext/appserver/standalone/configuration/truecontrol.keystore
+          /opt/NAserver/ext/appserver/standalone/configuration/.backup/truecontrol.keystore
+        when:
+          - var_host in ['1', '2', '3']
+         - var_part == '2'
+ 
+      - name: Find .p7b file in specified directory
+        find:
+          paths: "/home/certificates/newcerts/"
+          patterns: "*.p7b"
+        register: p7b_files
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+ 
+      - name: Apply new certificate to new keystore
+        expect:
+          command: "/opt/NA/jre/bin/keytool -import -trustcacerts \
+                    -alias '{{ host_var_map[var_host] }}' \
+                    -file {{ item.path }} \
+                    -keystore /home/certificates/keystore/truecontrol.keystore \
+                    -storetype PKCS12 \
+                    -storepass nakeeppass"
+          responses:
+            '.*Install reply anyway.*': 'yes'
+        with_items: "{{ p7b_files.files }}"
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+ 
+      - name: stopping {{ var_host }} services
+        truecontrol:
+          action: stop
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+ 
+      - name: overwrite working keystore with new keystore
+        shell: >
+          mv -f /home/certificates/keystore/truecontrol.keystore.pkcs12
+          /opt/NA/server/ext/appserver/standalone/configuration/truecontrol.keystore
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+ 
+      - name: starting {{ var_host }} services
+        truecontrol:
+          action: start
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+  ####################################################################################
+  # NNM
+  ####################################################################################
+
+      - name: ensure keystore backup directory exists
+        file:
+          path: /var/opt/OV/shared/nnm/certificates/.backup
+          state: directory
+          owner: root
+          group: root
+          mode: 0770
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: backup original keystores
+        shell: >
+          cp /var/opt/OV/shared/nnm/certificates/nnm-key.p12
+          /var/opt/OV/shared/nnm/certificates/.backup/nnm-key__$(date +"%Y-%m-%d").p12.bak
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+ 
+      - name: Find .p7c file in specified directory
+        find:
+          paths: "/home/certificates/newcerts/"
+          patterns: "*.p7c"
+        register: p7c_files
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: import p7c certificate into keystore
+        keytool_import:
+          target_file: "{{ p7c_files.files }}"
+          keytool_location: "{{ nnm_keytool_location }}"
+          keystore_location: "{{ keystore_location }}/nnm-key.p12"
+          keystore_password: "nnmkeypass"
+          storetype: "pkcs12"
+          alias: "{{ host_var_map[var_host] }}"
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: stopping {{ var_host }} services
+        ovcontrol:
+          action: stop
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: overwrite working keystore with new keystore
+        shell: >
+          mv -f /home/certificates/keystore/nnm-key.p12
+          /var/opt/OV/shared/nnm/certificates/nnm-key.p12
+        when:
+          - var_host in ['1', '2', '3']
+         - var_part == '2'
+ 
+      - name: starting {{ var_host }} services
+        ovcontrol:
+          action: start
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+ 
+  ####################################################################################
+  # OBM
+  ####################################################################################
+      - name: ensure part 2 directories for {{ var_host }} exist
+        file:
+          path: "{{ item }}"
+          state: directory
+          owner: ansible.s.mcn
+          group: wheel
+          mode: 0770
+        loop:
+          - /home/certificates/keystore/archive
+          - /home/certificates/exported_certificates
+          - /home/certificates/exported_certificates/p7b_to_pem
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: find p7b files
+        find:
+          paths: "/home/certificates/newcerts/"
+          patterns: "*.p7b"
+        register: obm_p7b_files
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: extract p7b file
+        convert_p7b:
+          src: "{{ item.path }}"
+          dest: "/home/certificates/exported_certificates/p7b_to_pem"
+          name: "{{ host_var_map[var_host] }}"
+        with_items: "{{ obm_p7b_files.files }}"
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: extract fullchain pem into individual certificates
+        extract_certs:
+          src: "/home/certiicates/exported_certificates/p7b_to_pem/{{ host_var_map[var_host] }}.pem"
+          dest: "/home/certificates/exported_certificates"
+        register: extract_result
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: extraction successful
+        debug:
+          msg: "{{ extract_result.message }}"
+        notify: if needed please assemble intermediate certificates
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: import p7b into keystore
+        keytool_import:
+          target_file: "{{ obm_p7b_files.files }}"
+          keytool_location: "{{ obm_keytool_location }}"
+          keystore_location: "{{ keystore_location }}/obm-key.p12"
+          keystore_password: "changeit"
+          storetype: "pkcs12"
+          alias: "{{ host_var_map[var_host] }}"
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+     
+      - name: Informational
+        debug:
+          msg: "**************All Certificates are located in /home/certificates/exported_certificates**************\n**************Keystore is located in /home/certificates/keystore**************\nIf you have more than one intermediate certificate, they will need to be concatenated.\nExample intermediateCA and softwareCA\ncat softwareCA intermediateCA > chaincertCA.cer"
+        when:
+          - var_host in ['1', '2', '3']
+          - var_part == '2'
+
+      - name: update permissions
+        file:
+          path: /home/certificates
+          state: directory
+          recurse: yes
+          owner: ansible
+          group: wheel
+          mode: 0770
